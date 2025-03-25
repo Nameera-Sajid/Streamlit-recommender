@@ -1,37 +1,69 @@
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
 import streamlit as st
 import pandas as pd
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.neighbors import NearestNeighbors
 
 # Load dataset
 @st.cache_data
 def load_data():
-    data = pd.read_csv("spotify_millsongdata.csv")
-    data['artist'] = data['artist'].str.strip().str.lower()  # Normalize artist names
-    return data
+    df = pd.read_csv("spotify_millsongdata.csv")
 
-data = load_data()
+    # Standardize column names
+    df.columns = df.columns.str.strip().str.lower()
 
-# User input
-st.title("Song Recommendation System")
-artist_names = data['artist'].unique()
-selected_artist = st.selectbox("Select an artist", artist_names)
+    # Check if required columns exist
+    if "song" not in df.columns or "artist" not in df.columns:
+        st.error("❌ Required columns ('song', 'artist') are missing in the dataset!")
+        st.stop()
 
-if selected_artist:
-    # Create TF-IDF matrix using artist data
-    tfidf = TfidfVectorizer(stop_words='english', max_features=1000, ngram_range=(1, 2))
-    tfidf_matrix = tfidf.fit_transform(data['artist'])
+    # Clean text
+    df["artist"] = df["artist"].str.strip().str.lower()
+    df["song"] = df["song"].str.strip().str.lower()
 
-    # Compute cosine similarity for the selected artist
-    artist_index = data[data['artist'] == selected_artist].index[0]
-    cosine_sim = cosine_similarity(tfidf_matrix[artist_index], tfidf_matrix, dense_output=False)
+    return df
 
-    # Sort similarity scores and filter out the same artist
-    similarity_scores = cosine_sim.toarray()[0]
-    sorted_scores = sorted(enumerate(similarity_scores), key=lambda x: x[1], reverse=True)
-    top_indices = [i[0] for i in sorted_scores if data.iloc[i[0]]['artist'] != selected_artist][:5]
+df = load_data()
 
-    # Display recommendations
-    recommended_songs = data.iloc[top_indices]
-    st.subheader(f"Top Recommendations for Artist: {selected_artist.title()}")
-    st.write(recommended_songs[['artist']])
+# TF-IDF Vectorization
+@st.cache_resource
+def train_model():
+    tfidf = TfidfVectorizer(stop_words="english")
+    tfidf_matrix = tfidf.fit_transform(df["song"] + " " + df["artist"])
+
+    # Use Nearest Neighbors instead of cosine_similarity
+    model = NearestNeighbors(n_neighbors=6, metric="cosine", algorithm="brute")
+    model.fit(tfidf_matrix)
+
+    return model, tfidf_matrix, tfidf
+
+model, tfidf_matrix, tfidf = train_model()
+
+# Get song recommendations
+def recommend_songs(song_name, num_recommendations=5):
+    song_name = song_name.lower().strip()
+
+    if song_name not in df["song"].values:
+        return ["❌ Song not found in dataset"]
+
+    song_idx = df[df["song"] == song_name].index[0]
+    song_vec = tfidf.transform([df.iloc[song_idx]["song"] + " " + df.iloc[song_idx]["artist"]])
+
+    distances, indices = model.kneighbors(song_vec, n_neighbors=num_recommendations + 1)
+    recommended_songs = [df.iloc[i]["song"].title() for i in indices[0][1:]]
+
+    return recommended_songs
+
+# Streamlit UI
+st.title("🎵 Song Recommendation System")
+
+selected_artist = st.selectbox("Select an artist", sorted(df["artist"].unique()))
+filtered_songs = df[df["artist"] == selected_artist]["song"].unique()
+selected_song = st.selectbox("Choose a song", filtered_songs)
+
+if st.button("Get Recommendations"):
+    recommendations = recommend_songs(selected_song)
+    st.write("### Recommended Songs:")
+    for song in recommendations:
+        st.write(f"🎶 {song}")
+
+
