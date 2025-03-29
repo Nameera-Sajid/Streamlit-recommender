@@ -1,69 +1,134 @@
 import streamlit as st
 import pandas as pd
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.neighbors import NearestNeighbors
+import plotly.express as px
+import speech_recognition as sr
+import time
+import os
+import spotipy
+from spotipy.oauth2 import SpotifyClientCredentials
+
+# Initialize Spotify API
+SPOTIFY_CLIENT_ID = "8bf626ce626c40c78523f9a649bec8e0"
+SPOTIFY_CLIENT_SECRET = "0fc65515fa2f4a909c55b97b4f070773"
+
+sp = spotipy.Spotify(auth_manager=SpotifyClientCredentials(client_id=SPOTIFY_CLIENT_ID, 
+                                                           client_secret=SPOTIFY_CLIENT_SECRET))
+
+# UI Enhancements
+st.set_page_config(page_title="🎵 Music Recommendation App", layout="wide")
 
 # Load dataset
-@st.cache_data
-def load_data():
-    df = pd.read_csv("spotify_millsongdata.csv")
+csv_file = "spotify_millsongdata.csv"
+if not os.path.exists(csv_file):
+    uploaded_file = st.file_uploader("Upload your CSV file", type=["csv"])
+    if uploaded_file:
+        with open(csv_file, "wb") as f:
+            f.write(uploaded_file.getbuffer())
+        st.success("✅ File uploaded successfully!")
 
-    # Standardize column names
-    df.columns = df.columns.str.strip().str.lower()
+if os.path.exists(csv_file):
+    df = pd.read_csv(csv_file)
+    st.write("📊 Dataset Preview:", df.head())
+else:
+    st.error("❌ File is still missing. Please upload `spotify_millsongdata.csv`.")
+    st.stop()
 
-    # Check if required columns exist
-    if "song" not in df.columns or "artist" not in df.columns:
-        st.error("❌ Required columns ('song', 'artist') are missing in the dataset!")
-        st.stop()
+# Data Visualization
+def visualize_data(df):
+    st.subheader("🎵 Music Data Insights")
+    top_artists = df['artist'].value_counts().head(10)
+    fig_artist = px.bar(top_artists, x=top_artists.index, y=top_artists.values, title='🔥 Top 10 Artists')
+    st.plotly_chart(fig_artist)
 
-    # Clean text
-    df["artist"] = df["artist"].str.strip().str.lower()
-    df["song"] = df["song"].str.strip().str.lower()
+# Voice Search
+def voice_search():
+    st.subheader("🎤 Voice Search for Songs")
+    try:
+        import pyaudio
+    except ImportError:
+        st.error("🚨 PyAudio is not installed. Install it using `pip install pyaudio`.")
+        return None
+    
+    r = sr.Recognizer()
+    with sr.Microphone() as source:
+        st.write("🎙️ Say the song name...")
+        time.sleep(1)
+        audio = r.listen(source)
+    
+    try:
+        query = r.recognize_google(audio)
+        st.success(f"🔍 Searching for: {query}")
+        return query
+    except sr.UnknownValueError:
+        st.error("😕 Sorry, couldn't understand your voice.")
+    except sr.RequestError:
+        st.error("🚨 Could not request results, check your connection.")
+    return None
 
-    return df
+# Fetch Spotify Song Preview
+def fetch_spotify_preview(song, artist):
+    query = f"track:{song} artist:{artist}"
+    results = sp.search(q=query, type="track", limit=1)
+    
+    if results["tracks"]["items"]:
+        track = results["tracks"]["items"][0]
+        preview_url = track.get("preview_url")  # 30s audio preview
+        spotify_url = track["external_urls"]["spotify"]  # Full track link
+        return preview_url, spotify_url
+    return None, None
 
-df = load_data()
+# Music Player
+def music_player():
+    st.subheader("🎵 Music Streaming & Playback")
+    song_choice = st.selectbox("Select a song:", df[['artist', 'song']].apply(lambda x: f"{x['artist']} - {x['song']}", axis=1))
+    artist, song = song_choice.split(" - ", 1)
+    
+    preview_url, spotify_url = fetch_spotify_preview(song, artist)
+    
+    if preview_url:
+        st.audio(preview_url, format="audio/mp3")
+    else:
+        st.warning("❌ No audio preview available.")
+    
+    if spotify_url:
+        st.markdown(f'<a href="{spotify_url}" target="_blank">🎧 Listen on Spotify</a>', unsafe_allow_html=True)
+    
+    st.write(f"🎵 **Now Playing:** {song} by {artist}")
 
-# TF-IDF Vectorization
-@st.cache_resource
-def train_model():
-    tfidf = TfidfVectorizer(stop_words="english")
-    tfidf_matrix = tfidf.fit_transform(df["song"] + " " + df["artist"])
+# Streamlit Tabs
+st.title("🎵 Music Recommendation App")
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 Data Visualization", "🎙️ Voice Search", "📜 Lyrics Search", "❤️ Favorites", "🎧 Music Player"])
 
-    # Use Nearest Neighbors instead of cosine_similarity
-    model = NearestNeighbors(n_neighbors=6, metric="cosine", algorithm="brute")
-    model.fit(tfidf_matrix)
+with tab1:
+    visualize_data(df)
 
-    return model, tfidf_matrix, tfidf
+with tab2:
+    voice_query = voice_search()
+    if voice_query:
+        results = df[df['song'].str.contains(voice_query, case=False, na=False)]
+        st.write(results)
 
-model, tfidf_matrix, tfidf = train_model()
+with tab3:
+    search_query = st.text_input("Enter song lyrics to search:")
+    if search_query:
+        results = df[df['text'].str.contains(search_query, case=False, na=False)]
+        st.write(results[['artist', 'song', 'text']])
 
-# Get song recommendations
-def recommend_songs(song_name, num_recommendations=5):
-    song_name = song_name.lower().strip()
+with tab4:
+    st.subheader("❤️ Your Favorite Songs")
+    favorites = st.session_state.get("favorites", [])
+    if favorites:
+        st.write(pd.DataFrame(favorites, columns=["Artist", "Song"]))
+    else:
+        st.write("No favorites yet!")
+    
+    song_choice = st.selectbox("Select a song to add to favorites:", df[['artist', 'song']].apply(lambda x: f"{x['artist']} - {x['song']}", axis=1))
+    if st.button("Add to Favorites"):
+        artist, song = song_choice.split(" - ", 1)
+        if "favorites" not in st.session_state:
+            st.session_state["favorites"] = []
+        st.session_state["favorites"].append((artist, song))
+        st.success(f"Added {song} by {artist} to favorites!")
 
-    if song_name not in df["song"].values:
-        return ["❌ Song not found in dataset"]
-
-    song_idx = df[df["song"] == song_name].index[0]
-    song_vec = tfidf.transform([df.iloc[song_idx]["song"] + " " + df.iloc[song_idx]["artist"]])
-
-    distances, indices = model.kneighbors(song_vec, n_neighbors=num_recommendations + 1)
-    recommended_songs = [df.iloc[i]["song"].title() for i in indices[0][1:]]
-
-    return recommended_songs
-
-# Streamlit UI
-st.title("🎵 Song Recommendation System")
-
-selected_artist = st.selectbox("Select an artist", sorted(df["artist"].unique()))
-filtered_songs = df[df["artist"] == selected_artist]["song"].unique()
-selected_song = st.selectbox("Choose a song", filtered_songs)
-
-if st.button("Get Recommendations"):
-    recommendations = recommend_songs(selected_song)
-    st.write("### Recommended Songs:")
-    for song in recommendations:
-        st.write(f"🎶 {song}")
-
-
+with tab5:
+    music_player()
